@@ -9,10 +9,12 @@ const SH = {
   BUDGETS  : 'Budgets',
   SALARIES : 'Salaries',
   CATS     : 'Categories',
+  CARDS    : 'Cards',
   SETTINGS : 'Settings'
 }
 
-const EXPENSE_COLS = ['id','date','amount','name','cat']
+const EXPENSE_COLS = ['id','date','amount','name','cat','pmType','cardId']
+const CARD_COLS = ['id','name','target']
 
 // ── 진입점 ────────────────────────────────────────────────────────────────
 
@@ -27,6 +29,10 @@ function doGet(e) {
       budgets: readMonthAmountMap(ss, SH.BUDGETS),
       salaries: readMonthAmountMap(ss, SH.SALARIES),
       cats: readSimpleList(ss, SH.CATS),
+      cards: readRows(ss, SH.CARDS, CARD_COLS).map(function(r){
+        r.target = Number(r.target) || 0
+        return r
+      }),
       _savedAt: readSavedAt(ss)
     }
     return ContentService.createTextOutput(JSON.stringify(D))
@@ -46,6 +52,7 @@ function doPost(e) {
     writeMonthAmountMap(ss, SH.BUDGETS, D.budgets || {})
     writeMonthAmountMap(ss, SH.SALARIES, D.salaries || {})
     writeSimpleList(ss, SH.CATS, D.cats || [])
+    writeRows(ss, SH.CARDS, D.cards || [], CARD_COLS)
     writeSavedAt(ss, D._savedAt || Date.now())
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true }))

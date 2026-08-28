@@ -110,6 +110,19 @@
   .dl-row .pct{ color:var(--muted-2); }
   .donut-empty{ font-size:12px; color:var(--muted-2); padding:8px 0; }
 
+  .card-perf{ background:var(--surface); border:1px solid var(--line-soft); border-radius:16px; padding:14px 16px; display:none; flex-direction:column; gap:12px; }
+  .card-perf-title{ font-size:11.5px; color:var(--muted); }
+  .cp-row{ display:flex; flex-direction:column; gap:5px; }
+  .cp-row-head{ display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:12px; }
+  .cp-row-head .name{ font-weight:700; flex:none; }
+  .cp-row-head .amt{ color:var(--muted); text-align:right; }
+  .cp-track{ position:relative; height:8px; border-radius:6px; background:var(--line-soft); }
+  .cp-fill{ position:absolute; inset:0 auto 0 0; width:0%; border-radius:6px; transition:width 700ms var(--ease-out); }
+  .cp-pct{ font-size:10.5px; color:var(--muted-2); text-align:right; }
+
+  .pm-badge{ display:inline-flex; align-items:center; gap:4px; font-size:10px; color:var(--muted-2); flex:none; max-width:64px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .pm-badge .pm-dot{ width:6px; height:6px; border-radius:50%; flex:none; }
+
   .chip-row{ display:flex; flex-wrap:wrap; gap:7px; }
   .chip{
     font-size:11.5px; padding:6px 12px; border-radius:100px; border:1px solid var(--line);
@@ -221,6 +234,8 @@
     <button class="arrow" onclick="shiftMonth(1)">›</button>
   </div>
 
+  <div class="card-perf" id="cardPerfCard"></div>
+
   <div class="ledger" id="ledgerCard"></div>
 
   <div class="donut-card" id="donutCard"></div>
@@ -258,6 +273,11 @@
       <label>카테고리</label>
       <div class="chip-row" id="catChipRow"></div>
     </div>
+    <div class="field">
+      <label>결제수단</label>
+      <div class="chip-row" id="pmChipRow"></div>
+      <div class="chip-row" id="cardChipRow" style="display:none;"></div>
+    </div>
 
     <button class="btn-primary" onclick="saveEntry()">저장</button>
   </div>
@@ -286,6 +306,13 @@
       <div class="title">카테고리</div>
       <div id="catList"></div>
       <button class="add-row" onclick="addCategory()">+ 카테고리 추가</button>
+    </div>
+
+    <div class="settings-sec">
+      <div class="title">신용카드</div>
+      <div id="cardSettingsList"></div>
+      <button class="add-row" onclick="addCard()">+ 카드 추가</button>
+      <div class="hint">전월실적 기준액을 등록해두면 위쪽 대시보드에서 이번 달 진행률을 볼 수 있어요</div>
     </div>
 
     <div class="settings-sec">
@@ -323,14 +350,20 @@ var D = load() || {
   budgets: {},
   salaries: {},
   cats: ['식비','생필품','의류','취미','교통비','구독료','폰요금','보험','의료비','경조사·선물','저축','기타'],
+  cards: [], // 등록된 신용카드 목록 { id, name, target(전월실적 기준액) }. 체크카드/현금은 카드명 구분 없이 pmType만 기록
   _savedAt: 0
 };
+if(!D.cards) D.cards = []; // 카드 필드 추가 전에 저장된 데이터 하위호환
+
+var PM_TYPES = [ {key:'credit', label:'신용카드'}, {key:'check', label:'체크카드'}, {key:'cash', label:'현금'} ];
 
 var today = new Date();
 var viewMonth = ym(today);
 var activeFilter = 'all';
 var editingId = null; // null이면 새 항목 추가, 값이 있으면 해당 id의 항목을 수정 중
 var selectedCat = null;
+var selectedPm = null; // null(미지정) | 'credit' | 'check' | 'cash' — 결제수단은 필수 아님
+var selectedCardId = null; // selectedPm === 'credit'일 때만 사용
 
 // ── 유틸 ────────────────────────────────────────────────────────────────
 function ym(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0'); }
@@ -448,6 +481,7 @@ function loadFromGas(force, isInitial){
     if(applied){
       D = remote;
       if(!D.salaries) D.salaries = {};
+      if(!D.cards) D.cards = [];
       localStorage.setItem(STORAGE_KEY, JSON.stringify(D));
       renderAll();
     }
@@ -478,10 +512,46 @@ function renderSyncStatus(){
 // ── 렌더 ────────────────────────────────────────────────────────────────
 function renderAll(){
   document.getElementById('monthLabel').textContent = monthLabel(viewMonth);
+  renderCardPerf();
   renderLedger();
   renderDonut();
   renderFilterChips();
   renderExpenseList();
+}
+
+// 카드별 이번 달(보고 있는 달) 신용카드 사용액 — pmType이 'credit'이고 해당 카드로 태깅된 지출만 합산.
+// 결제수단 미지정/체크카드/현금 지출은 여기 안 잡힘(사용자 확정: 카드실적은 소급 적용 안 하고 앞으로 입력하는 것부터)
+function cardSpend(cardId, ymStr){
+  return expensesForMonth(ymStr)
+    .filter(function(e){ return e.pmType === 'credit' && e.cardId === cardId; })
+    .reduce(function(s,e){ return s + Number(e.amount||0); }, 0);
+}
+
+function renderCardPerf(){
+  var el = document.getElementById('cardPerfCard');
+  if(!D.cards.length){ el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'flex';
+
+  var rows = D.cards.map(function(c){
+    var spent = cardSpend(c.id, viewMonth);
+    var target = Number(c.target) || 0;
+    var pct = target ? Math.min(999, Math.round(spent / target * 100)) : 0;
+    var achieved = target > 0 && spent >= target;
+    var trackHtml = target
+      ? ('<div class="cp-track"><div class="cp-fill" style="background:' + (achieved ? 'var(--pos)' : 'var(--accent)') + ';" data-pct="' + Math.min(100, pct) + '"></div></div>' +
+         '<div class="cp-pct">' + (achieved ? '✓ 실적 채웠어요' : pct + '% 달성') + '</div>')
+      : '<div class="cp-pct">설정에서 기준액을 등록해보세요</div>';
+    return '<div class="cp-row">' +
+      '<div class="cp-row-head"><span class="name">' + escapeHtml(c.name) + '</span><span class="amt num">' + fmtWon(spent) + (target ? (' / ' + fmtWon(target)) : '') + '</span></div>' +
+      trackHtml +
+    '</div>';
+  }).join('');
+
+  el.innerHTML = '<div class="card-perf-title">신용카드 실적 · ' + monthLabel(viewMonth) + '</div>' + rows;
+
+  requestAnimationFrame(function(){
+    el.querySelectorAll('.cp-fill').forEach(function(f){ f.style.width = f.getAttribute('data-pct') + '%'; });
+  });
 }
 
 function renderLedger(){
@@ -621,6 +691,25 @@ function renderFilterChips(){
 
 function setFilter(f){ activeFilter = f; renderFilterChips(); renderExpenseList(); }
 
+// 결제수단 색점 + 텍스트. 색은 카테고리 팔레트와 별개로 결제수단 3종 고정색(신용/체크/현금).
+// 신용카드는 카드명, 체크카드/현금은 그 단어 그대로. 미지정 지출(e.pmType 없음)엔 아예 표시 안 함
+function pmBadgeHtml(e){
+  if(!e.pmType) return '';
+  var color, text;
+  if(e.pmType === 'credit'){
+    color = cssVar('--over');
+    var card = D.cards.find(function(c){ return c.id === e.cardId; });
+    text = card ? card.name : '카드(삭제됨)';
+  } else if(e.pmType === 'check'){
+    color = cssVar('--p3');
+    text = '체크카드';
+  } else {
+    color = cssVar('--muted-2');
+    text = '현금';
+  }
+  return '<span class="pm-badge"><span class="pm-dot" style="background:' + color + ';"></span>' + escapeHtml(text) + '</span>';
+}
+
 function expenseRowHtml(e){
   var idx = D.cats.indexOf(e.cat);
   if(idx < 0) idx = 0;
@@ -630,6 +719,7 @@ function expenseRowHtml(e){
     '<span class="cat-dot" style="background:' + color + ';"></span>' +
     '<span class="date num">' + Number(d[1]) + '/' + Number(d[2]) + '</span>' +
     '<span class="name">' + escapeHtml(e.name) + '</span>' +
+    pmBadgeHtml(e) +
     '<span class="amt num">' + fmtWon(e.amount) + '</span>' +
     '<span class="rt"><span class="edit" onclick="openEditExpense(\'' + e.id + '\')">수정</span><span class="del" onclick="tryDeleteExpense(\'' + e.id + '\')">삭제</span></span>' +
   '</div>';
@@ -676,7 +766,10 @@ function openAddSheet(){
   document.getElementById('fAmount').value = '';
   document.getElementById('fName').value = '';
   selectedCat = null;
+  selectedPm = null;
+  selectedCardId = null;
   renderCatChips();
+  renderPmChips();
   document.getElementById('addOverlay').classList.add('open');
 }
 function closeAddSheet(){ document.getElementById('addOverlay').classList.remove('open'); editingId = null; }
@@ -690,7 +783,10 @@ function openEditExpense(id){
   document.getElementById('fAmount').value = e.amount;
   document.getElementById('fName').value = e.name;
   selectedCat = e.cat;
+  selectedPm = e.pmType || null;
+  selectedCardId = e.cardId || null;
   renderCatChips();
+  renderPmChips();
   document.getElementById('addOverlay').classList.add('open');
 }
 
@@ -703,6 +799,31 @@ function renderCatChips(){
 }
 function pickCat(c){ selectedCat = c; renderCatChips(); }
 
+function renderPmChips(){
+  var el = document.getElementById('pmChipRow');
+  el.innerHTML = PM_TYPES.map(function(p){
+    return '<span class="chip ' + (selectedPm===p.key?'on':'') + '" onclick="pickPm(\'' + p.key + '\')">' + p.label + '</span>';
+  }).join('');
+  renderCardChipRow();
+}
+function pickPm(key){
+  selectedPm = (selectedPm === key) ? null : key; // 같은 칩 다시 누르면 미지정으로 해제
+  if(selectedPm !== 'credit') selectedCardId = null;
+  renderPmChips();
+}
+function renderCardChipRow(){
+  var el = document.getElementById('cardChipRow');
+  if(selectedPm !== 'credit' || !D.cards.length){
+    el.style.display = 'none'; el.innerHTML = '';
+    return;
+  }
+  el.style.display = 'flex';
+  el.innerHTML = D.cards.map(function(c){
+    return '<span class="chip ' + (selectedCardId===c.id?'on':'') + '" onclick="pickCard(\'' + c.id + '\')">' + escapeHtml(c.name) + '</span>';
+  }).join('');
+}
+function pickCard(id){ selectedCardId = (selectedCardId === id) ? null : id; renderCardChipRow(); }
+
 function saveEntry(){
   var date = document.getElementById('fDate').value;
   var amount = Number(document.getElementById('fAmount').value);
@@ -713,11 +834,14 @@ function saveEntry(){
   if(!name){ alert('항목명을 입력해주세요'); return; }
   if(!selectedCat){ alert('카테고리를 선택해주세요'); return; }
 
+  var pmType = selectedPm || null;
+  var cardId = (pmType === 'credit') ? selectedCardId : null;
+
   if(editingId){
     var entry = D.expenses.find(function(x){ return x.id === editingId; });
-    if(entry){ entry.date = date; entry.amount = amount; entry.name = name; entry.cat = selectedCat; }
+    if(entry){ entry.date = date; entry.amount = amount; entry.name = name; entry.cat = selectedCat; entry.pmType = pmType; entry.cardId = cardId; }
   } else {
-    D.expenses.push({ id: uid(), date: date, amount: amount, name: name, cat: selectedCat });
+    D.expenses.push({ id: uid(), date: date, amount: amount, name: name, cat: selectedCat, pmType: pmType, cardId: cardId });
   }
 
   save();
@@ -736,6 +860,7 @@ function openSettings(){
   document.getElementById('fGasUrl').value = gasUrl();
   renderSyncStatus();
   renderCatSettingsList();
+  renderCardSettingsList();
   document.getElementById('settingsOverlay').classList.add('open');
 }
 function closeSettings(){ document.getElementById('settingsOverlay').classList.remove('open'); renderAll(); }
@@ -775,6 +900,40 @@ function removeCategory(name){
   D.cats = D.cats.filter(function(c){ return c !== name; });
   save();
   renderCatSettingsList();
+}
+
+// ── 신용카드 관리 (카테고리와 동일한 패턴) ──────────────────────────────────
+function renderCardSettingsList(){
+  var el = document.getElementById('cardSettingsList');
+  if(!D.cards.length){ el.innerHTML = '<div class="hint">등록된 카드가 없어요</div>'; return; }
+  el.innerHTML = D.cards.map(function(c){
+    return '<div class="setting-row"><span class="name">' + escapeHtml(c.name) +
+      ' <span style="color:var(--muted-2);font-weight:400;">(' + fmtWon(Number(c.target)||0) + ' 기준)</span></span>' +
+      '<span class="del" onclick="removeCard(\'' + c.id + '\')">삭제</span></div>';
+  }).join('');
+}
+
+function addCard(){
+  var name = prompt('카드 이름 (예: 현대카드)');
+  if(!name) return;
+  name = name.trim();
+  if(!name) return;
+  var targetStr = prompt('전월실적 기준액 (원, 숫자만)');
+  var target = Number(targetStr) || 0;
+  D.cards.push({ id: uid(), name: name, target: target });
+  save();
+  renderCardSettingsList();
+}
+
+// 카드 삭제 — 카테고리 삭제와 동일한 방침: 기존 지출 기록은 그대로 두고,
+// 카드실적 카드/리스트 표시에서만 사라짐(pmBadgeHtml에서 "카드(삭제됨)"으로 대체 표시)
+function removeCard(id){
+  var c = D.cards.find(function(x){ return x.id === id; });
+  if(!c) return;
+  if(!confirm('"' + c.name + '" 카드를 삭제할까요? (기존 지출 기록은 유지되지만 카드명 표시는 사라져요)')) return;
+  D.cards = D.cards.filter(function(x){ return x.id !== id; });
+  save();
+  renderCardSettingsList();
 }
 
 // ── 초기화 ──────────────────────────────────────────────────────────────
