@@ -194,6 +194,8 @@
   }
   .btn-primary:hover{ background:var(--accent-ink); }
   .btn-primary:active{ transform:scale(.98); }
+  /* 지출 시트 저장 버튼: 크게 + 시트가 스크롤돼도 하단에 붙어 있음. 그림자는 뒤로 지나가는 칩을 가리는 용도 */
+  .btn-save{ position:sticky; bottom:0; height:52px; font-size:15px; flex:none; box-shadow:0 0 0 10px var(--surface); }
 
   .settings-sec{ display:flex; flex-direction:column; gap:9px; }
   .settings-sec .title{ font-size:12px; font-weight:700; }
@@ -279,7 +281,7 @@
       <div class="chip-row" id="cardChipRow" style="display:none;"></div>
     </div>
 
-    <button class="btn-primary" onclick="saveEntry()">저장</button>
+    <button class="btn-primary btn-save" onclick="saveEntry()">저장</button>
   </div>
 </div>
 
@@ -349,11 +351,26 @@ var D = load() || {
   expenses: [],
   budgets: {},
   salaries: {},
-  cats: ['식비','생필품','의류','취미','교통비','구독료','폰요금','보험','의료비','경조사·선물','저축','기타'],
+  cats: ['식비','커피','생필품','의류','취미','교통비','구독료','폰요금','보험','의료비','경조사·선물','저축','기타'],
   cards: [], // 등록된 신용카드 목록 { id, name, target(전월실적 기준액) }. 체크카드/현금은 카드명 구분 없이 pmType만 기록
   _savedAt: 0
 };
-if(!D.cards) D.cards = []; // 카드 필드 추가 전에 저장된 데이터 하위호환
+backfill(D);
+
+// 예전 데이터 하위호환 — localStorage에서 읽을 때와 구글시트에서 받아올 때 둘 다 거침.
+// save()를 안 부르므로 _savedAt이 안 바뀌어 동기화 판단에 영향 없음
+function backfill(d){
+  if(!d.salaries) d.salaries = {};
+  if(!d.cards) d.cards = []; // 카드 필드 추가 전에 저장된 데이터
+  // ponytail: 커피가 없으면 매번 식비 뒤에 다시 넣음 — 설정에서 커피를 지워도 다음 실행 때 되살아남. 지우고 싶어지면 이 줄 삭제
+  if(d.cats.indexOf('커피') < 0) d.cats.splice(d.cats.indexOf('식비') + 1, 0, '커피');
+}
+
+// 지출 입력 시트에 바로 보이는 카테고리. 나머지는 "더보기"를 눌러야 나옴 (사용자 확정 2026-10-28)
+// D.cats에 실제로 있는 이름만 보여주므로, 설정에서 지우거나 이름을 바꿔도 깨지지 않음
+var MAIN_CATS = ['식비','커피','생필품','교통비','취미','저축'];
+// 도넛 차트에서만 하나로 합쳐 보여주는 카테고리. 입력·리스트·필터는 각각 따로 (사용자 확정 2026-10-28)
+var DONUT_GROUP = { '구독료':'고정비', '폰요금':'고정비', '보험':'고정비' };
 
 var PM_TYPES = [ {key:'credit', label:'신용카드'}, {key:'check', label:'체크카드'}, {key:'cash', label:'현금'} ];
 
@@ -362,6 +379,7 @@ var viewMonth = ym(today);
 var activeFilter = 'all';
 var editingId = null; // null이면 새 항목 추가, 값이 있으면 해당 id의 항목을 수정 중
 var selectedCat = null;
+var catsExpanded = false; // 지출 시트에서 "더보기"를 눌렀는지. 한 번 펼치면 시트를 닫을 때까지 유지
 var selectedPm = null; // null(미지정) | 'credit' | 'check' | 'cash' — 결제수단은 필수 아님
 var selectedCardId = null; // selectedPm === 'credit'일 때만 사용
 
@@ -488,8 +506,7 @@ function loadFromGas(force, isInitial){
     var applied = force || (remote._savedAt||0) > (D._savedAt||0);
     if(applied){
       D = remote;
-      if(!D.salaries) D.salaries = {};
-      if(!D.cards) D.cards = [];
+      backfill(D);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(D));
       renderAll();
     }
@@ -645,16 +662,17 @@ function categoryBreakdown(){
   var order = [];
 
   list.forEach(function(e){
-    if(!buckets[e.cat]){
-      buckets[e.cat] = { label:e.cat, amount:0 };
-      order.push(e.cat);
+    var key = DONUT_GROUP[e.cat] || e.cat;
+    if(!buckets[key]){
+      buckets[key] = { label:key, colorCat:e.cat, amount:0 }; // 묶음(고정비)은 처음 나온 하위 카테고리 색을 씀
+      order.push(key);
     }
-    buckets[e.cat].amount += Number(e.amount||0);
+    buckets[key].amount += Number(e.amount||0);
   });
 
   var result = order.map(function(key){
     var b = buckets[key];
-    var idx = D.cats.indexOf(b.label);
+    var idx = D.cats.indexOf(b.colorCat);
     if(idx < 0) idx = 0;
     return { label:b.label, amount:b.amount, pct: total? Math.round(b.amount/total*100):0, color: catColor(b.label, idx) };
   }).sort(function(a,b){ return b.amount - a.amount; });
@@ -774,6 +792,7 @@ function openAddSheet(){
   document.getElementById('fAmount').value = '';
   document.getElementById('fName').value = '';
   selectedCat = null;
+  catsExpanded = false;
   selectedPm = null;
   selectedCardId = null;
   renderCatChips();
@@ -791,6 +810,7 @@ function openEditExpense(id){
   document.getElementById('fAmount').value = Number(e.amount).toLocaleString();
   document.getElementById('fName').value = e.name;
   selectedCat = e.cat;
+  catsExpanded = MAIN_CATS.indexOf(e.cat) < 0; // 숨김 쪽 카테고리면 선택된 게 보이도록 펼친 채로 열기
   selectedPm = e.pmType || null;
   selectedCardId = e.cardId || null;
   renderCatChips();
@@ -798,12 +818,17 @@ function openEditExpense(id){
   document.getElementById('addOverlay').classList.add('open');
 }
 
+// 자주 쓰는 것 먼저, 펼치면 나머지를 뒤에 이어 붙임 (펼쳐도 앞쪽 칩 위치는 그대로)
 function renderCatChips(){
   var el = document.getElementById('catChipRow');
-  el.innerHTML = D.cats.map(function(c){
+  var main = D.cats.filter(function(c){ return MAIN_CATS.indexOf(c) >= 0; });
+  var rest = D.cats.filter(function(c){ return MAIN_CATS.indexOf(c) < 0; });
+  var chips = main.concat(catsExpanded ? rest : []).map(function(c){
     var isSave = c === '저축';
     return '<span class="chip ' + (isSave?'dashed':'') + ' ' + (selectedCat===c?('on'+(isSave?' save-on':'')):'') + '" onclick="pickCat(\'' + c + '\')">' + c + '</span>';
-  }).join('');
+  });
+  if(!catsExpanded && rest.length) chips.push('<span class="chip dashed" onclick="catsExpanded=true; renderCatChips()">더보기 ▾</span>');
+  el.innerHTML = chips.join('');
 }
 function pickCat(c){ selectedCat = c; renderCatChips(); }
 
